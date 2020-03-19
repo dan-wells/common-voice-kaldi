@@ -27,7 +27,8 @@ if [ $stage -le 0 ]; then
 fi
 
 if [ $stage -le 1 ]; then
-  # Select only utterances with accent labels and resample data
+  # Select only utterances with accent labels and resample data,
+  # excluding New Zealand and India
   if [ $accent_only = true ]; then
     local/prep_accent_corpus.sh en $corpus data
   else

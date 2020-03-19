@@ -29,8 +29,8 @@ FNR==1 && NR!=1 {
 NR==1 {
     print $0, "locale", "bucket"
 }
-# Skip rows with no or accent label "other", or blank transcription
-NR>1 && $8!="" && $8!="other" && $3!="" {
+# Skip rows with blank transcripts or empty or unwanted accent labels
+NR>1 && $8!="" && $8!~/indian|newzealand|other/ && $3!="" {
     print $0, lang, ""
 }' $source_dir/{validated.tsv,invalidated.tsv,other.tsv} > $source_dir/clips.tsv
 
