@@ -170,15 +170,16 @@ if [ $stage -le 8 ]; then
     exp/tri3b_ali_train exp/tri4b
 
   # decode using the tri4b model
-  # this one is required for chain model training so always run it
-  (
-    utils/mkgraph.sh data/lang_test exp/tri4b exp/tri4b/graph
-    for testset in dev; do
-      steps/decode_fmllr.sh --nj 8 --cmd "$decode_cmd" \
-        exp/tri4b/graph data/$testset \
-        exp/tri4b/decode_$testset
-    done
-  )&
+  if [ $bg_decode = true ]; then
+    (
+      utils/mkgraph.sh data/lang_test exp/tri4b exp/tri4b/graph
+      for testset in dev; do
+        steps/decode_fmllr.sh --nj 8 --cmd "$decode_cmd" \
+          exp/tri4b/graph data/$testset \
+          exp/tri4b/decode_$testset
+      done
+    )&
+  fi
 fi
 
 # Train and extract i-vectors
@@ -193,8 +194,8 @@ if [ $stage -le 10 ]; then
   if [ $use_gpu = true ]; then
     local/chain/run_tdnn.sh --stage 0
   else
-    echo "Not expecting to have GPU resources available (use_gpu=$use_gpu)."
-    echo "Finishing without training final chain model."
+    echo "$0: Not expecting to have GPU resources available (use_gpu=$use_gpu)."
+    echo "$0: Finishing without training final chain model."
   fi
 fi
 
