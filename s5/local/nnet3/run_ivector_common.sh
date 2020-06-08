@@ -53,9 +53,6 @@ if [ $stage -le 3 ]; then
   # this shows how you can split across multiple file-systems.
   echo "$0: creating high-resolution MFCC features"
   mfccdir=data/${train_set}_sp_hires/data
-  #if [[ $(hostname -f) == *.clsp.jhu.edu ]] && [ ! -d $mfccdir/storage ]; then
-  #  utils/create_split_dir.pl /export/b1{5,6,7,8}/$USER/kaldi-data/mfcc/commonvoice-$(date +'%m_%d_%H_%M')/s5/$mfccdir/storage $mfccdir/storage
-  #fi
 
   for datadir in ${train_set}_sp ${test_sets}; do
     utils/copy_data_dir.sh data/$datadir data/${datadir}_hires
@@ -124,10 +121,6 @@ if [ $stage -le 6 ]; then
   # valid for the non-'max2' data, the utterance list is the same.
 
   ivectordir=exp/nnet3${nnet3_affix}/ivectors_${train_set}_sp_hires
-  #if [[ $(hostname -f) == *.clsp.jhu.edu ]] && [ ! -d $ivectordir/storage ]; then
-  #  utils/create_split_dir.pl /export/b0{5,6,7,8}/$USER/kaldi-data/ivectors/commonvoice-$(date +'%m_%d_%H_%M')/s5/$ivectordir/storage $ivectordir/storage
-  #fi
-
 
   # having a larger number of speakers is helpful for generalization, and to
   # handle per-utterance decoding well (iVector starts at zero).
@@ -138,7 +131,9 @@ if [ $stage -le 6 ]; then
   steps/online/nnet2/extract_ivectors_online.sh --cmd "$train_cmd" --nj 16 \
     ${temp_data_root}/${train_set}_sp_hires_max2 \
     exp/nnet3${nnet3_affix}/extractor $ivectordir
+fi
 
+if [ $stage -le 7 ]; then
   # Also extract iVectors for the test data, but in this case we don't need the speed
   # perturbation (sp).
   for data in $test_sets; do

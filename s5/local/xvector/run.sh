@@ -21,21 +21,20 @@
 . ./path.sh
 set -e
 
-xvec_affix=_1a
+xvec_affix=1a
 nnet_dir=exp/xvector_nnet${xvec_affix}
-
-# features may be different than for ASR
-mfccdir=data/mfcc/xvec${xvec_affix}
-vaddir=data/mfcc/xvec${xvec_affix}
+train_set=train_sp
+test_sets="dev test"
 
 # data augmentation and filtering to apply
-do_sp=true
+do_augment=false
+do_sp=false
 do_rvb=false
 do_musan=false
-do_augment=false
 do_filter=true
 
 do_eval=true
+
 stage=0
 
 . utils/parse_options.sh
@@ -43,7 +42,7 @@ stage=0
 
 if [ $stage -le 0 ]; then
   data_root=/mnt/data/mozilla_common_voice/en_1488h_2019-12-10
-  for part in train dev test; do
+  for part in $train_set $test_sets; do
     utils/copy_data_dir.sh data/${part} data/xvec_${part}
     local/data_prep.pl $data_root data $part data/xvec_${part}
   done
@@ -53,12 +52,12 @@ fi
 if [ $stage -le 1 ]; then
   # Make MFCCs and compute the energy-based VAD for each dataset
   # MFCC config is different from that used for ASR, so we keep them separate
-  for part in train dev test; do
-    steps/make_mfcc.sh --write-utt2num-frames true --mfcc-config local/xvector/conf/mfcc.conf --nj 16 --cmd "$train_cmd" \
-      data/xvec_${part} exp/make_mfcc/xvec${xvec_affix} $mfccdir
+  for part in train_sp $test_sets; do
+    steps/make_mfcc.sh --nj 16 --cmd "$train_cmd" --write-utt2num-frames true \
+      --mfcc-config local/xvector/conf/mfcc.conf data/xvec_${part}
     utils/fix_data_dir.sh data/xvec_${part}
     steps/compute_vad_decision.sh --nj 16 --cmd "$train_cmd" \
-      --vad-config local/xvector/conf/vad.conf data/xvec_${part} exp/make_vad/xvec${xvec_affix} $vaddir
+      --vad-config local/xvector/conf/vad.conf data/xvec_${part}
     utils/fix_data_dir.sh data/xvec_${part}
   done
 fi
@@ -69,13 +68,16 @@ fi
 # noise, music, and babble, and combined it with the clean data.
 # The combined list will be used to train the xvector DNN.  The SRE
 # subset will be used to train the PLDA model.
-if [ $stage -le 2 ]; then
-  frame_shift=0.01
-  awk -v frame_shift=$frame_shift '{print $1, $2*frame_shift;}' data/xvec_train/utt2num_frames > data/xvec_train/reco2dur
-
+if [ $stage -le 2 ] && [ $do_augment = true ]; then
   if [ $do_sp = true ]; then
+    # TODO(danwells): All following steps assume we're reusing train_sp from
+    #   preceding model training steps, so this probably won't work if trying
+    #   to apply speed perturbation to a different train set
     echo "$0: preparing directory for speed-perturbed data"
-    utils/data/perturb_data_dir_speed_3way.sh data/xvec_train data/xvec_train_sp
+    frame_shift=0.01
+    awk -v frame_shift=$frame_shift '{print $1, $2*frame_shift;}' \
+      data/xvec_${train_set}/utt2num_frames > data/xvec_${train_set}/reco2dur
+    utils/data/perturb_data_dir_speed_3way.sh data/xvec_${train_set} data/xvec_${train_set}_sp
   fi
 
   if [ $do_rvb = true ]; then
@@ -126,38 +128,33 @@ if [ $stage -le 2 ]; then
     steps/data/augment_data_dir.py --utt-affix "babble" --bg-snrs "20:17:15:13" --num-bg-noises "3:4:5:6:7" --bg-noise-dir "data/musan_speech" data/swbd_sre data/swbd_sre_babble
   fi
 
-  if [ $do_augment = true ]; then
-    # Combine reverb, noise, music, and babble into one directory.
-    utils/combine_data.sh data/swbd_sre_aug data/swbd_sre_reverb data/swbd_sre_noise data/swbd_sre_music data/swbd_sre_babble
+  # TODO(danwells): make robust to different combinations of augmentation
+  # Combine reverb, noise, music, and babble into one directory.
+  utils/combine_data.sh data/swbd_sre_aug data/swbd_sre_reverb data/swbd_sre_noise data/swbd_sre_music data/swbd_sre_babble
 
-    # Take a random subset of the augmentations (128k is somewhat larger than twice
-    # the size of the SWBD+SRE list)
-    utils/subset_data_dir.sh data/swbd_sre_aug 128000 data/swbd_sre_aug_128k
-    utils/fix_data_dir.sh data/swbd_sre_aug_128k
-  fi
+  # Take a random subset of the augmentations (128k is somewhat larger than twice
+  # the size of the SWBD+SRE list)
+  utils/subset_data_dir.sh data/swbd_sre_aug 128000 data/swbd_sre_aug_128k
+  utils/fix_data_dir.sh data/swbd_sre_aug_128k
 
-  # TODO(danwells): sort out augmentation: we use train_sp cos already
-  #   have it from previous model training
   # Make MFCCs for the augmented data.  Note that we do not compute a new
   # vad.scp file here.  Instead, we use the vad.scp from the clean version of
   # the list.
-  steps/make_mfcc.sh --mfcc-config local/xvector/conf/mfcc.conf --nj 16 --cmd "$train_cmd" \
-    data/xvec_train_sp exp/make_mfcc/xvec${xvec_affix} $mfccdir
+  steps/make_mfcc.sh --nj 16 --cmd "$train_cmd" \
+    --mfcc-config local/xvector/conf/mfcc.conf data/swbd_sre_aug_128k
   #cp data/train/vad.scp data/train_sp
   steps/compute_vad_decision.sh --nj 16 --cmd "$train_cmd" \
-    --vad-config local/xvector/conf/vad.conf data/xvec_train_sp exp/make_vad/xvec${xvec_affix} $vaddir
+    --vad-config local/xvector/conf/vad.conf data/swbd_sre_aug_128k
 
-  if [ $do_augment = true ]; then
-    # Combine the clean and augmented SWBD+SRE list.  This is now roughly
-    # double the size of the original clean list.
-    utils/combine_data.sh data/swbd_sre_combined data/swbd_sre_aug_128k data/swbd_sre
+  # Combine the clean and augmented SWBD+SRE list.  This is now roughly
+  # double the size of the original clean list.
+  utils/combine_data.sh data/swbd_sre_combined data/swbd_sre_aug_128k data/swbd_sre
 
-    # Filter out the clean + augmented portion of the SRE list.  This will be used to
-    # train the PLDA model later in the script.
-    utils/copy_data_dir.sh data/swbd_sre_combined data/sre_combined
-    utils/filter_scp.pl data/sre/spk2utt data/swbd_sre_combined/spk2utt | utils/spk2utt_to_utt2spk.pl > data/sre_combined/utt2spk
-    utils/fix_data_dir.sh data/sre_combined
-  fi
+  # Filter out the clean + augmented portion of the SRE list.  This will be used to
+  # train the PLDA model later in the script.
+  utils/copy_data_dir.sh data/swbd_sre_combined data/sre_combined
+  utils/filter_scp.pl data/sre/spk2utt data/swbd_sre_combined/spk2utt | utils/spk2utt_to_utt2spk.pl > data/sre_combined/utt2spk
+  utils/fix_data_dir.sh data/sre_combined
 fi
 
 
@@ -167,19 +164,19 @@ if [ $stage -le 3 ]; then
   # wasteful, as it roughly doubles the amount of training data on disk.  After
   # creating training examples, this can be removed.
   local/xvector/prepare_feats_for_egs.sh --nj 16 --cmd "$train_cmd" \
-    data/xvec_train_sp data/xvec_train_sp_no_sil exp/xvec_train_sp_no_sil
-  utils/fix_data_dir.sh data/xvec_train_sp_no_sil
+    data/xvec_${train_set} data/xvec_${train_set}_no_sil data/xvec_${train_set}_no_sil
+  utils/fix_data_dir.sh data/xvec_${train_set}_no_sil
 
   if [ $do_filter = true ]; then
     # Now, we need to remove features that are too short after removing silence
     # frames.  We want atleast 5s (500 frames) per utterance.
     # (in v2, 300 gives 318735/347136 _sp utts; 200 would be 344829)
     min_len=300
-    mv data/xvec_train_sp_no_sil/utt2num_frames data/xvec_train_sp_no_sil/utt2num_frames.bak
-    awk -v min_len=${min_len} '$2 > min_len {print $1, $2}' data/xvec_train_sp_no_sil/utt2num_frames.bak > data/xvec_train_sp_no_sil/utt2num_frames
-    utils/filter_scp.pl data/xvec_train_sp_no_sil/utt2num_frames data/xvec_train_sp_no_sil/utt2spk > data/xvec_train_sp_no_sil/utt2spk.new
-    mv data/xvec_train_sp_no_sil/utt2spk.new data/xvec_train_sp_no_sil/utt2spk
-    utils/fix_data_dir.sh data/xvec_train_sp_no_sil
+    awk -v min_len=${min_len} '$2 > min_len {print $1, $2}' data/xvec_${train_set}_no_sil/utt2num_frames > data/xvec_${train_set}_no_sil/utt2num_frames.new
+    mv data/xvec_${train_set}_no_sil/utt2num_frames.new data/xvec_${train_set}_no_sil/utt2num_frames
+    utils/filter_scp.pl data/xvec_${train_set}_no_sil/utt2num_frames data/xvec_${train_set}_no_sil/utt2spk > data/xvec_${train_set}_no_sil/utt2spk.new
+    mv data/xvec_${train_set}_no_sil/utt2spk.new data/xvec_${train_set}_no_sil/utt2spk
+    utils/fix_data_dir.sh data/xvec_${train_set}_no_sil
 
     # TODO(danwells): check statistics on this, maybe don't apply either
     #   -- shouldn't be relevant for LID anyway, remember this was SID first
@@ -197,7 +194,7 @@ fi
 
 ##### Run x-vector DNN training ######
 local/xvector/run_xvector.sh --stage $stage --train-stage -1 \
-  --data data/xvec_train_sp_no_sil --nnet-dir $nnet_dir \
+  --data data/xvec_${train_set}_no_sil --nnet-dir $nnet_dir \
   --egs-dir $nnet_dir/egs
 ######################################
 
@@ -207,12 +204,12 @@ if [ $stage -le 7 ]; then
   # - train will be passed as auxiliary inputs during ASR training
   # - others can be used for evaluating xvectors per se
   # NB. this is slow! even on GPU
-  for part in train_sp dev test; do
+  for part in $train_set $test_sets; do
     echo "Extracting x-vectors for dataset $part... This will probably take a while!"
     local/xvector/extract_xvectors.sh --cmd "$train_cmd --mem 6G" \
       --use-gpu false --nj 8 \
       $nnet_dir data/xvec_${part} \
-      exp/xvectors/${part}${xvec_affix}
+      data/xvec_$part/xvec${xvec_affix}
   done
 fi
 
@@ -222,25 +219,25 @@ if [ $do_eval = true ]; then
   #   xvectors before passing to ASR model?
   if [ $stage -le 8 ]; then
     # Compute the mean vector for centering the evaluation xvectors.
-    $train_cmd exp/xvectors/train_sp${xvec_affix}/log/compute_mean.log \
-      ivector-mean ark:data/xvec_train_sp/lang2utt scp:exp/xvectors/train_sp${xvec_affix}/xvector.scp \
-      ark:exp/xvectors/train_sp${xvec_affix}/mean.vec ark,t:exp/xvectors/train_sp${xvec_affix}/num_utts.ark || exit 1;
-    $train_cmd exp/xvectors/train_sp${xvec_affix}/log/compute_global_mean.log \
-      ivector-mean scp:exp/xvectors/train_sp${xvec_affix}/xvector.scp \
-      exp/xvectors/train_sp${xvec_affix}/global_mean.vec || exit 1;
+    $train_cmd data/xvec_$train_set/xvec${xvec_affix}/log/compute_mean.log \
+      ivector-mean ark:data/xvec_${train_set}/lang2utt scp:data/xvec_$train_set/xvec${xvec_affix}/xvector.scp \
+      ark:data/xvec_$train_set/xvec${xvec_affix}/mean.vec ark,t:data/xvec_$train_set/xvec${xvec_affix}/num_utts.ark || exit 1;
+    $train_cmd data/xvec_$train_set/xvec${xvec_affix}/log/compute_global_mean.log \
+      ivector-mean scp:data/xvec_$train_set/xvec${xvec_affix}/xvector.scp \
+      data/xvec_$train_set/xvec${xvec_affix}/global_mean.vec || exit 1;
 
     # This script uses LDA to decrease the dimensionality prior to PLDA.
     lda_dim=150
-    $train_cmd exp/xvectors/train_sp${xvec_affix}/log/lda.log \
+    $train_cmd data/xvec_$train_set/xvec${xvec_affix}/log/lda.log \
       ivector-compute-lda --total-covariance-factor=0.0 --dim=$lda_dim \
-      "ark:ivector-subtract-global-mean scp:exp/xvectors/train_sp${xvec_affix}/xvector.scp ark:- |" \
-      ark:data/xvec_train_sp/utt2lang exp/xvectors/train_sp${xvec_affix}/transform.mat || exit 1;
+      "ark:ivector-subtract-global-mean scp:data/xvec_$train_set/xvec${xvec_affix}/xvector.scp ark:- |" \
+      ark:data/xvec_${train_set}/utt2lang data/xvec_$train_set/xvec${xvec_affix}/transform.mat || exit 1;
 
     # Train PLDA model.
-    $train_cmd exp/xvectors/train_sp${xvec_affix}/log/plda.log \
-      ivector-compute-plda ark:data/train_xvec_sp/lang2utt \
-      "ark:ivector-subtract-global-mean scp:exp/xvectors/train_sp${xvec_affix}/xvector.scp ark:- | transform-vec exp/xvectors/train_sp${xvec_affix}/transform.mat ark:- ark:- | ivector-normalize-length ark:-  ark:- |" \
-      exp/xvectors/train_sp${xvec_affix}/plda || exit 1;
+    $train_cmd data/xvec_$train_set/xvec${xvec_affix}/log/plda.log \
+      ivector-compute-plda ark:data/xvec_${train_set}/lang2utt \
+      "ark:ivector-subtract-global-mean scp:data/xvec_$train_set/xvec${xvec_affix}/xvector.scp ark:- | transform-vec data/xvec_$train_set/xvec${xvec_affix}/transform.mat ark:- ark:- | ivector-normalize-length ark:-  ark:- |" \
+      data/xvec_$train_set/xvec${xvec_affix}/plda || exit 1;
 
     # Here we adapt the out-of-domain PLDA model to SRE16 major, a pile
     # of unlabeled in-domain data.  In the future, we will include a clustering
@@ -254,38 +251,39 @@ if [ $do_eval = true ]; then
 
 
   if [ $stage -le 9 ]; then
-    # Generate AID trials file
-    python local/xvector/get_trials.py data/test_xvec/utt2lang \
-      exp/xvectors/test${xvec_affix}/xvector.scp exp/xvectors/test${xvec_affix}/aid_trials.txt
+    for part in $test_sets; do
+      # Generate AID trials file
+      python local/xvector/get_trials.py data/xvec_$part/utt2lang \
+        data/xvec_$part/xvec${xvec_affix}/xvector.scp exp/aid_eval/$part/aid_trials.txt
 
-    # Get results using the PLDA model.
-    # Average models per language are 'enrolled' using all train data
-    # and evaluated against per-utterance models from test
-    $train_cmd exp/aid_scores/log/test${xvec_affix}_plda_scoring.log \
-      ivector-plda-scoring --normalize-length=true \
-      --num-utts=ark:exp/xvectors/train_sp${xvec_affix}/num_utts.ark \
-      "ivector-copy-plda --smoothing=0.0 exp/xvectors/train_sp${xvec_affix}/plda - |" \
-      "ark:ivector-mean ark:data/xvec_train_sp/lang2utt scp:exp/xvectors/train_sp${xvec_affix}/xvector.scp ark:- | ivector-subtract-global-mean exp/xvectors/train_sp${xvec_affix}/global_mean.vec ark:- ark:- | transform-vec exp/xvectors/train_sp${xvec_affix}/transform.mat ark:- ark:- | ivector-normalize-length ark:- ark:- |" \
-      "ark:ivector-subtract-global-mean exp/xvectors/train_sp${xvec_affix}/global_mean.vec scp:exp/xvectors/test${xvec_affix}/xvector.scp ark:- | transform-vec exp/xvectors/train_sp${xvec_affix}/transform.mat ark:- ark:- | ivector-normalize-length ark:- ark:- |" \
-      "cat exp/xvectors/test${xvec_affix}/aid_trials.txt | cut -d' ' -f1,2 |" exp/aid_scores/test${xvec_affix}_plda_scores || exit 1;
+      # Get results using the PLDA model.
+      # Average models per language are 'enrolled' using all train data
+      # and evaluated against per-utterance models from test
+      $train_cmd exp/aid_eval/$part/${xvec_affix}_plda_scoring.log \
+        ivector-plda-scoring --normalize-length=true \
+        --num-utts=ark:data/xvec_$train_set/xvec${xvec_affix}/num_utts.ark \
+        "ivector-copy-plda --smoothing=0.0 data/xvec_$train_set/xvec${xvec_affix}/plda - |" \
+        "ark:ivector-mean ark:data/xvec_${train_set}/lang2utt scp:data/xvec_$train_set/xvec${xvec_affix}/xvector.scp ark:- | ivector-subtract-global-mean data/xvec_$train_set/xvec${xvec_affix}/global_mean.vec ark:- ark:- | transform-vec data/xvec_$train_set/xvec${xvec_affix}/transform.mat ark:- ark:- | ivector-normalize-length ark:- ark:- |" \
+        "ark:ivector-subtract-global-mean data/xvec_$train_set/xvec${xvec_affix}/global_mean.vec scp:data/xvec_$part/xvec${xvec_affix}/xvector.scp ark:- | transform-vec data/xvec_$train_set/xvec${xvec_affix}/transform.mat ark:- ark:- | ivector-normalize-length ark:- ark:- |" \
+        "cat exp/aid_eval/$part/aid_trials.txt | cut -d' ' -f1,2 |" exp/aid_eval/$part/xvec${xvec_affix}_plda_scores || exit 1;
 
-    # Evaluate EER, accuracy
-    paste exp/xvectors/test${xvec_affix}/aid_trials.txt exp/aid_scores/test${xvec_affix}_plda_scores | \
-      awk '{print $6,$3}' | compute-eer - | tee exp/aid_scores/test${xvec_affix}_plda_eer
-    python local/xvector/get_lid_acc.py data/xvec_test/utt2lang exp/aid_scores/test${xvec_affix}_plda_scores | \
-      tee exp/aid_scores/test${xvec_affix}_plda_acc
+      # Evaluate EER, accuracy
+      paste exp/aid_eval/$part/aid_trials.txt exp/aid_eval/$part/xvec${xvec_affix}_plda_scores | \
+        awk '{print $6,$3}' | compute-eer - | tee exp/aid_eval/$part/xvec${xvec_affix}_plda_eer
+      python local/xvector/get_lid_acc.py data/xvec_$part/utt2lang exp/aid_eval/$part/xvec${xvec_affix}_plda_scores | \
+        tee exp/aid_eval/$part/xvec${xvec_affix}_plda_acc
 
-    # Evaluate xvector network outputs
-    # Temporarily hide extract.config so that running xvector network forward
-    # produces log softmax outputs instead of xvectors
-    mv $nnet_dir/extract.config $nnet_dir/extract.config.bak
-    local/xvector/extract_xvectors.sh --cmd "run.pl --mem 6G" \
-      --use-gpu false --nj 8 \
-      $nnet_dir data/xvec_test exp/xvectors/test${xvec_affix}_logsoftmax
-    mv $nnet_dir/extract.config.bak $nnet_dir/extract.config
-    copy-vector scp:exp/xvectors/test${xvec_affix}_logsoftmax/xvector.scp ark,t:exp/xvectors/test${xvec_affix}_logsoftmax/xvector.txt
-    python local/xvector/logsoftmax2acc.py exp/xvectors/test${xvec_affix}_logsoftmax/xvector.txt \
-      $nnet_dir/egs/temp/lang2int data/xvec_test/utt2lang | tee exp/aid_scores/test${xvec_affix}_logsoftmax
-
+      # Evaluate xvector network outputs
+      # Temporarily hide extract.config so that running xvector network forward
+      # produces log softmax outputs instead of xvectors
+      mv $nnet_dir/extract.config $nnet_dir/extract.config.bak
+      local/xvector/extract_xvectors.sh --cmd "run.pl --mem 6G" \
+        --use-gpu false --nj 8 \
+        $nnet_dir data/xvec_$part data/xvec_$part/xvec${xvec_affix}_logsoftmax
+      mv $nnet_dir/extract.config.bak $nnet_dir/extract.config
+      copy-vector scp:data/xvec_$part/xvec${xvec_affix}_logsoftmax/xvector.scp ark,t:data/xvec_$part/xvec${xvec_affix}_logsoftmax/xvector.txt
+      python local/xvector/logsoftmax2acc.py data/xvec_$part/xvec${xvec_affix}_logsoftmax/xvector.txt \
+        $nnet_dir/egs/temp/lang2int data/xvec_$part/utt2lang | tee exp/aid_eval/$part/xvec${xvec_affix}_logsoftmax
+    done
   fi
 fi

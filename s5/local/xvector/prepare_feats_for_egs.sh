@@ -43,11 +43,6 @@ mkdir -p $dir/log
 mkdir -p $data_out
 featdir=$(utils/make_absolute.sh $dir)
 
-if [[ $(hostname -f) == *.clsp.jhu.edu ]] && [ ! -d $featdir/storage ]; then
-  utils/create_split_dir.pl \
-    /export/b{14,15,16,17}/$USER/kaldi-data/egs/sre16/v2/xvector-$(date +'%m_%d_%H_%M')/xvector_feats/storage $featdir/storage
-fi
-
 for n in $(seq $nj); do
   # the next command does nothing unless $featdir/storage/ exists, see
   # utils/create_data_link.pl for more info.

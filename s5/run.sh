@@ -9,13 +9,24 @@
 corpus=/mnt/data/common_voice_en_1488h_20191210
 corpus_url=https://voice-prod-bundler-ee1969a6ce8178826482b88e843c335139bd3fb4.s3.amazonaws.com/cv-corpus-4-2019-12-10/en.tar.gz
 accent_only=true
-bg_decode=false
-use_gpu=false
+exclude_accs=""
+
+bg_decode=true
+use_gpu=true
+
+test_sets="dev test"
+nnet3_affix=""
+tdnn_affix=1a
+
+acc_vec=xvec
+acc_vec_affix=1a
 
 . ./cmd.sh
 . ./path.sh
 
 stage=0
+stage_ivec=0  # 7 to extract ivectors for test sets only
+stage_tdnn=0  # 7 to extract decode test sets only
 
 . ./utils/parse_options.sh
 
@@ -27,9 +38,10 @@ if [ $stage -le 0 ]; then
 fi
 
 if [ $stage -le 1 ]; then
-  # Select only utterances with accent labels and resample data
+  # Select only utterances with accent labels and resample data,
+  # possibly excluding certain accents from train and dev sets
   if [ $accent_only = true ]; then
-    local/prep_accent_corpus.sh en $corpus data
+    local/prep_accent_corpus.sh en $corpus data "$exclude_accs"
   else
     mkdir -p data/en
     cp $corpus/{train,dev,test}.tsv data/en
@@ -59,17 +71,9 @@ if [ $stage -le 2 ]; then
 fi
 
 if [ $stage -le 3 ]; then
-  mfccdir=mfcc
-  # spread the mfccs over various machines, as this data-set is quite large.
-  #if [[  $(hostname -f) ==  *.clsp.jhu.edu ]]; then
-  #  mfcc=$(basename mfccdir) # in case was absolute pathname (unlikely), get basename.
-  #  utils/create_split_dir.pl /export/b{07,14,16,17}/$USER/kaldi-data/mfcc/commonvoice/s5/$mfcc/storage \
-  #    $mfccdir/storage
-  #fi
-
   for part in train dev test; do
-    steps/make_mfcc.sh --cmd "$train_cmd" --nj 16 data/$part exp/make_mfcc/$part $mfccdir
-    steps/compute_cmvn_stats.sh data/$part exp/make_mfcc/$part $mfccdir
+    steps/make_mfcc.sh --cmd "$train_cmd" --nj 16 data/$part
+    steps/compute_cmvn_stats.sh data/$part
   done
 
   # Get the shortest 10000 utterances first because those are more likely
@@ -87,9 +91,9 @@ if [ $stage -le 4 ]; then
   if [ $bg_decode = true ]; then
     (
       utils/mkgraph.sh data/lang_test exp/mono exp/mono/graph
-      for testset in dev; do
-        steps/decode.sh --nj 16 --cmd "$decode_cmd" exp/mono/graph \
-          data/$testset exp/mono/decode_$testset
+      for data in $test_sets; do
+        steps/decode.sh --nj 8 --cmd "$decode_cmd" exp/mono/graph \
+          data/$data exp/mono/decode_$data
       done
     )&
   fi
@@ -107,9 +111,9 @@ if [ $stage -le 5 ]; then
   if [ $bg_decode = true ]; then
     (
       utils/mkgraph.sh data/lang_test exp/tri1 exp/tri1/graph
-      for testset in dev; do
+      for data in $test_sets; do
         steps/decode.sh --nj 8 --cmd "$decode_cmd" exp/tri1/graph \
-          data/$testset exp/tri1/decode_$testset
+          data/$data exp/tri1/decode_$data
       done
     )&
   fi
@@ -128,9 +132,9 @@ if [ $stage -le 6 ]; then
   if [ $bg_decode = true ]; then
     (
       utils/mkgraph.sh data/lang_test exp/tri2b exp/tri2b/graph
-      for testset in dev; do
+      for data in $test_sets; do
         steps/decode.sh --nj 8 --cmd "$decode_cmd" exp/tri2b/graph \
-          data/$testset exp/tri2b/decode_$testset
+          data/$data exp/tri2b/decode_$data
       done
     )&
   fi
@@ -149,9 +153,9 @@ if [ $stage -le 7 ]; then
   if [ $bg_decode = true ]; then
     (
       utils/mkgraph.sh data/lang_test exp/tri3b exp/tri3b/graph
-      for testset in dev; do
+      for data in $test_sets; do
         steps/decode_fmllr.sh --nj 8 --cmd "$decode_cmd" \
-          exp/tri3b/graph data/$testset exp/tri3b/decode_$testset
+          exp/tri3b/graph data/$data exp/tri3b/decode_$data
       done
     )&
   fi
@@ -172,10 +176,10 @@ if [ $stage -le 8 ]; then
   if [ $bg_decode = true ]; then
     (
       utils/mkgraph.sh data/lang_test exp/tri4b exp/tri4b/graph
-      for testset in dev; do
+      for data in $test_sets; do
         steps/decode_fmllr.sh --nj 8 --cmd "$decode_cmd" \
-          exp/tri4b/graph data/$testset \
-          exp/tri4b/decode_$testset
+          exp/tri4b/graph data/$data \
+          exp/tri4b/decode_$data
       done
     )&
   fi
@@ -183,15 +187,16 @@ fi
 
 # Train and extract i-vectors
 if [ $stage -le 9 ]; then
-  nnet3_affix=""
-  local/nnet3/run_ivector_common.sh --stage 0 \
-    --train-set train --gmm tri4b --nnet3-affix "$nnet3_affix"
+  local/nnet3/run_ivector_common.sh --stage $stage_ivec \
+    --train-set train --gmm tri4b --nnet3-affix $nnet3_affix
 fi
 
 # Train a chain model
 if [ $stage -le 10 ]; then
   if [ $use_gpu = true ]; then
-    local/chain/run_tdnn.sh --stage 0
+    local/chain/run_tdnn.sh --stage $stage_tdnn \
+      --affix $tdnn_affix --nnet3-affix $nnet3_affix --test-sets $test_sets \
+      --acc-vec $acc_vec --acc-vec-affix $acc_vec_affix
   else
     echo "$0: Not expecting to have GPU resources available (use_gpu=$use_gpu)."
     echo "$0: Finishing without training final chain model."

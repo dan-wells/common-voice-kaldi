@@ -2,6 +2,7 @@
 language=$1
 source_dir=$2
 out_dir=$3
+exclude_accs=$4
 
 set -euo pipefail
 
@@ -36,4 +37,14 @@ NR>1 && $8!="" && $8!="other" && $3!="" {
 
 echo "$0: preparing train-dev-test partitions using CorporaCreator"
 create-corpora -d $out_dir -f $source_dir/clips.tsv
+
+# Exclude particular accents from train and dev sets, but keep in test
+# TODO(danwells): Add this into create-corpora instead
+if [ -n "$exclude_accs" ]; then
+  for part in train dev; do
+    echo "Excluding utterances from $part meta according to pattern /$exclude_accs/"
+    grep -Pv "\t${exclude_accs}$" $out_dir/$language/$part.tsv > tmp.tsv
+    mv tmp.tsv $out_dir/$language/$part.tsv
+  done
+fi
 
